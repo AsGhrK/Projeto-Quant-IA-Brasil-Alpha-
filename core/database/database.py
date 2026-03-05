@@ -1,17 +1,31 @@
 import sqlite3
+import os
 
-def create_connection():
-    """
-    Cria conexão com o banco SQLite e inicializa tabelas se necessário.
+# ==========================================
+# CAMINHOS DOS BANCOS (Isolamento de Dados)
+# ==========================================
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../../'))
+MARKET_DB_PATH = os.path.join(BASE_DIR, 'market_data.db')
+USER_DB_PATH = os.path.join(BASE_DIR, 'user_data.db')
 
-    Returns:
-        sqlite3.Connection: Conexão com o banco.
-    """
-    conn = sqlite3.connect("market_data.db")
-    cursor = conn.cursor()
+def get_market_connection():
+    """Conexão APENAS para dados de mercado (Ações, Cripto, Notícias)."""
+    return sqlite3.connect(MARKET_DB_PATH)
 
-    # STOCKS
-    cursor.execute("""
+def get_user_connection():
+    """Conexão APENAS para dados sensíveis (Usuários, Senhas, Carteiras)."""
+    return sqlite3.connect(USER_DB_PATH)
+
+def init_databases():
+    """Inicializa os dois bancos de dados com suas respectivas tabelas."""
+    
+    # ---------------------------------------------------------
+    # 1. BANCO DE MERCADO (Pode ser apagado e recriado sem dor)
+    # ---------------------------------------------------------
+    conn_market = get_market_connection()
+    c_market = conn_market.cursor()
+
+    c_market.execute("""
     CREATE TABLE IF NOT EXISTS stocks (
         ticker TEXT,
         date TEXT,
@@ -21,8 +35,7 @@ def create_connection():
     )
     """)
 
-    # GLOBAL MARKETS
-    cursor.execute("""
+    c_market.execute("""
     CREATE TABLE IF NOT EXISTS global_markets (
         symbol TEXT,
         date TEXT,
@@ -32,8 +45,7 @@ def create_connection():
     )
     """)
 
-    # CRYPTO
-    cursor.execute("""
+    c_market.execute("""
     CREATE TABLE IF NOT EXISTS crypto (
         symbol TEXT,
         date TEXT,
@@ -43,8 +55,7 @@ def create_connection():
     )
     """)
 
-    # NEWS
-    cursor.execute("""
+    c_market.execute("""
     CREATE TABLE IF NOT EXISTS news (
         title TEXT,
         published_at TEXT,
@@ -54,40 +65,38 @@ def create_connection():
         PRIMARY KEY (title, published_at)
     )
     """)
+    conn_market.commit()
+    conn_market.close()
 
-    # USUARIOS (Tabela Nova)
-    #   - armazenaremos aqui o nome, username e a senha em formato hash (bcrypt);
-    #     nunca armazene senhas em texto puro. O aplicativo cuidará do hashing.
-    cursor.execute("""
+    # ---------------------------------------------------------
+    # 2. BANCO DE USUÁRIOS (Dados Sensíveis e Protegidos)
+    # ---------------------------------------------------------
+    conn_user = get_user_connection()
+    c_user = conn_user.cursor()
+
+    c_user.execute("""
     CREATE TABLE IF NOT EXISTS usuarios (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         nome TEXT,
-        username TEXT UNIQUE,
-        password TEXT
+        username TEXT UNIQUE NOT NULL,
+        password TEXT NOT NULL
     )
     """)
 
-    # PORTFOLIO (Tabela Nova vinculada ao Usuário)
-    # NOTA: coluna 'dividendo_por_cota' é DEPRECATED
-    #   - direitos: dividendos agora são buscados dinamicamente via API (Yahoo Finance)
-    #   - mantida por compatibilidade com registros antigos
-    #   - novos cálculos ignoram esse valor e usam sempre dados da API
-    cursor.execute("""
+    c_user.execute("""
     CREATE TABLE IF NOT EXISTS portfolio (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT,
-        ticker TEXT,
-        quantidade REAL,
-        preco_medio REAL,
-        dividendo_por_cota REAL,
-        FOREIGN KEY(username) REFERENCES usuarios(username)
+        user_id INTEGER NOT NULL,
+        ticker TEXT NOT NULL,
+        quantidade REAL NOT NULL,
+        preco_medio REAL NOT NULL,
+        FOREIGN KEY(user_id) REFERENCES usuarios(id)
     )
     """)
-
-    conn.commit()
-    return conn
+    
+    conn_user.commit()
+    conn_user.close()
 
 if __name__ == "__main__":
-    # Executar este arquivo diretamente garante que todas as tabelas sejam criadas
-    create_connection()
-    print("Banco de dados 'market_data.db' inicializado com sucesso.")
+    init_databases()
+    print("✅ SEGURANÇA APLICADA: Bancos 'market_data.db' e 'user_data.db' criados e isolados com sucesso!")

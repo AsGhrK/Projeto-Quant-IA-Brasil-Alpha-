@@ -37,8 +37,8 @@ def get_ai_recommendation(ticker, ml_prob, accuracy, regime_status, df=None):
     # --------------------------
 
     # Busca sentimento médio das últimas notícias no banco
-    from core.database.database import create_connection
-    conn = create_connection()
+    from core.database.database import get_market_connection
+    conn = get_market_connection()
     try:
         sentiment_df = pd.read_sql(f"SELECT sentiment FROM news ORDER BY published_at DESC LIMIT 10", conn)
         avg_sentiment = sentiment_df['sentiment'].mean() if not sentiment_df.empty else 0.0

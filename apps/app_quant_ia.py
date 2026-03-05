@@ -14,7 +14,7 @@ import plotly.graph_objects as go
 import re
 
 # Importando a conexão do seu arquivo database.py
-from core.database.database import create_connection
+from core.database.database import get_market_connection, get_user_connection, init_databases
 # scheduler ajuda a manter o banco com dados frescos
 from scripts.scheduler import start_scheduler
 # AI assistant
@@ -64,7 +64,7 @@ st.markdown("""
 # ==========================================
 # garante que o banco exista e as tabelas estejam criadas. O próprio
 # create_connection já faz `CREATE TABLE IF NOT EXISTS` quando chamado.
-create_connection()
+init_databases()
 
 # inicia o coletor em segundo plano apenas uma vez por execução do Streamlit
 if 'scheduler_started' not in st.session_state:
@@ -96,7 +96,7 @@ def cadastrar_usuario_db(nome, username, password):
     persistir no banco. Caso o nome de usuário já exista, retorna False.
     """
     try:
-        conn = create_connection()
+        conn = get_user_connection()
         cursor = conn.cursor()
         # geramos hash seguro; armazenamos como string utf-8
         hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
@@ -108,68 +108,85 @@ def cadastrar_usuario_db(nome, username, password):
     except sqlite3.IntegrityError:
         return False
 
-def verificar_login_db(username, password):
-    """Valida um login comparando a senha fornecida com o hash armazenado.
-
-    Retorna o nome do usuário se a autenticação for bem-sucedida ou `None`.
-    """
-    conn = create_connection()
+def verificar_login_db(usuario, senha):
+    conn = get_user_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT nome, password FROM usuarios WHERE username = ?', (username,))
+    cursor.execute("SELECT password, nome FROM usuarios WHERE username = ?", (usuario,))
     resultado = cursor.fetchone()
     conn.close()
-
-    if not resultado:
-        return None
-
-    nome, pw_hash = resultado
-    try:
-        if bcrypt.checkpw(password.encode('utf-8'), pw_hash.encode('utf-8')):
-            return nome
-    except ValueError:
-        # caso a senha no banco não seja um hash válido (usuário antigo),
-        # compara diretamente e faz a migração imediata para hash bcrypt.
-        if password == pw_hash:
-            try:
-                conn = create_connection()
-                cur = conn.cursor()
-                novo_hash = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-                cur.execute('UPDATE usuarios SET password = ? WHERE username = ?', (novo_hash, username))
-                conn.commit()
-                conn.close()
-            except Exception:
-                pass
-            return nome
+    
+    if resultado:
+        senha_hash_db, nome = resultado
+        import bcrypt
+        # Verifica se a senha bate com o hash (ou texto puro se for legado)
+        try:
+            if bcrypt.checkpw(senha.encode('utf-8'), senha_hash_db):
+                return nome
+        except ValueError:
+            # Fallback caso tenha salvo a senha em texto puro antes de usar bcrypt
+            if senha == senha_hash_db:
+                return nome
     return None
+
+def cadastrar_usuario_db(nome, usuario, senha):
+    import bcrypt
+    conn = get_user_connection()
+    cursor = conn.cursor()
+    
+    # Gera o hash seguro da senha
+    salt = bcrypt.gensalt()
+    senha_hash = bcrypt.hashpw(senha.encode('utf-8'), salt)
+    
+    try:
+        cursor.execute("INSERT INTO usuarios (nome, username, password) VALUES (?, ?, ?)", 
+                       (nome, usuario, senha_hash))
+        conn.commit()
+        sucesso = True
+    except sqlite3.IntegrityError:
+        sucesso = False # Usuário já existe
+    finally:
+        conn.close()
+        
+    return sucesso
 
 def carregar_carteira(username):
     """
-    Carrega a carteira do usuário do banco de dados.
+    Carrega a carteira do usuário do banco de dados relacional.
 
     Args:
         username (str): Nome do usuário.
 
     Returns:
-        pd.DataFrame: DataFrame com ticker, quantidade, preco_medio, dividendo_por_cota.
+        pd.DataFrame: DataFrame com ticker, quantidade, preco_medio.
     """
-    conn = create_connection()
-    df = pd.read_sql("SELECT ticker, quantidade, preco_medio FROM portfolio WHERE username = ?", conn, params=(username,))
+    conn = get_user_connection()
+    
+    # A nova query liga a tabela portfolio à tabela usuarios para encontrar as ações certas
+    query = """
+        SELECT p.ticker, p.quantidade, p.preco_medio 
+        FROM portfolio p
+        JOIN usuarios u ON p.user_id = u.id
+        WHERE u.username = ?
+    """
+    
+    df = pd.read_sql(query, conn, params=(username,))
     conn.close()
     return df
 
 def gerir_ativo_db(username, ticker, qtd_nova, pm_novo):
     """
-    Gerencia adição ou atualização de ativo na carteira.
-
-    Args:
-        username (str): Nome do usuário.
-        ticker (str): Símbolo do ativo.
-        qtd_nova (float): Quantidade a adicionar.
-        pm_novo (float): Preço médio da operação.
+    Gerencia adição ou atualização de ativo na carteira usando user_id relacional.
     """
-    conn = create_connection()
+    from core.database.database import get_user_connection
+    conn = get_user_connection()
     cursor = conn.cursor()
-    cursor.execute('SELECT quantidade, preco_medio FROM portfolio WHERE username = ? AND ticker = ?', (username, ticker))
+    
+    # 1. Primeiro pega o ID do usuário usando o username
+    cursor.execute("SELECT id FROM usuarios WHERE username = ?", (username,))
+    user_id = cursor.fetchone()[0]
+
+    # 2. Verifica se o ativo já existe na carteira DESTE usuário
+    cursor.execute('SELECT quantidade, preco_medio FROM portfolio WHERE user_id = ? AND ticker = ?', (user_id, ticker))
     resultado = cursor.fetchone()
     
     if resultado:
@@ -177,26 +194,30 @@ def gerir_ativo_db(username, ticker, qtd_nova, pm_novo):
         qtd_total = qtd_atual + qtd_nova
         if qtd_total > 0:
             pm_calculado = ((qtd_atual * pm_atual) + (qtd_nova * pm_novo)) / qtd_total
-            cursor.execute('UPDATE portfolio SET quantidade = ?, preco_medio = ? WHERE username = ? AND ticker = ?', (qtd_total, pm_calculado, username, ticker))
+            cursor.execute('UPDATE portfolio SET quantidade = ?, preco_medio = ? WHERE user_id = ? AND ticker = ?', (qtd_total, pm_calculado, user_id, ticker))
         else:
-            cursor.execute('DELETE FROM portfolio WHERE username = ? AND ticker = ?', (username, ticker))
+            cursor.execute('DELETE FROM portfolio WHERE user_id = ? AND ticker = ?', (user_id, ticker))
     else:
-        cursor.execute('INSERT INTO portfolio (username, ticker, quantidade, preco_medio, dividendo_por_cota) VALUES (?, ?, ?, ?, ?)', (username, ticker.upper(), qtd_nova, pm_novo, 0.0))
+        # 3. Insere um novo ativo vinculado ao user_id (sem a coluna dividendo_por_cota antiga)
+        cursor.execute('INSERT INTO portfolio (user_id, ticker, quantidade, preco_medio) VALUES (?, ?, ?, ?)', (user_id, ticker.upper(), qtd_nova, pm_novo))
         
     conn.commit()
     conn.close()
 
 def remover_ativo_db(username, ticker):
     """
-    Remove ou reduz quantidade de ativo na carteira.
-
-    Args:
-        username (str): Nome do usuário.
-        ticker (str): Símbolo do ativo.
+    Remove totalmente um ativo da carteira usando user_id relacional.
     """
-    conn = create_connection()
+    from core.database.database import get_user_connection
+    conn = get_user_connection()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM portfolio WHERE username = ? AND ticker = ?', (username, ticker))
+    
+    # 1. Pega o ID do usuário
+    cursor.execute("SELECT id FROM usuarios WHERE username = ?", (username,))
+    user_id = cursor.fetchone()[0]
+    
+    # 2. Deleta usando o user_id
+    cursor.execute('DELETE FROM portfolio WHERE user_id = ? AND ticker = ?', (user_id, ticker))
     conn.commit()
     conn.close()
 
@@ -297,7 +318,7 @@ def processar_carteira_tempo_real(carteira_df):
 
 def buscar_dados_macro():
     """Busca os dados macroeconômicos mais recentes do banco de dados"""
-    conn = create_connection()
+    conn = get_market_connection()
     dados = {
         'IBOV': {'valor': 0.0, 'var': 0.0},
         'BTC': {'valor': 0.0, 'var': 0.0},
@@ -305,6 +326,7 @@ def buscar_dados_macro():
         'EUR/BRL': {'valor': 0.0, 'var': 0.0},
         'ETH': {'valor': 0.0, 'var': 0.0}
     }
+    
     
     try:
         # IBOV
@@ -606,7 +628,7 @@ def tela_dashboard():
     st.markdown("---")
     st.markdown("<div class='titulo-secao'>📰 Principais Notícias (Impacto no Mercado)</div>", unsafe_allow_html=True)
     
-    conn = create_connection()
+    conn = get_market_connection()
     try:
         news_df = pd.read_sql("SELECT title, description, sentiment, published_at FROM news ORDER BY published_at DESC LIMIT 5", conn)
         if not news_df.empty:
@@ -667,7 +689,6 @@ def tela_gerir_carteira():
         
         novo_ticker = st.text_input(
             "Símbolo do Ativo (Pressione ENTER para buscar)",
-            value=st.session_state['novo_ticker_input'],
             key="novo_ticker_input",
             on_change=atualizar_ticker
         )

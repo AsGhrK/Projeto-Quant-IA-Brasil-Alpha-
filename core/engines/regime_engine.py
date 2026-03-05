@@ -1,9 +1,10 @@
 import sqlite3
 import pandas as pd
 import numpy as np
+from core.database.database import get_market_connection
 
 def get_latest_data(symbol):
-    conn = sqlite3.connect("market_data.db")
+    conn = get_market_connection()
 
     df = pd.read_sql(f"""
         SELECT * FROM global_markets

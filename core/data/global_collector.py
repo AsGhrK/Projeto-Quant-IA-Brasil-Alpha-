@@ -1,9 +1,8 @@
 import yfinance as yf
-import sqlite3
+from core.database.database import get_market_connection
 import pandas as pd
 
 def collect_global_data():
-
     markets = {
         "^BVSP": "IBOVESPA",
         "^GSPC": "SP500",
@@ -22,35 +21,26 @@ def collect_global_data():
         "^HSI": "HANGSENG"
     }
 
-    conn = sqlite3.connect("market_data.db")
+    conn = get_market_connection()
     cursor = conn.cursor()
 
     for ticker, name in markets.items():
-
         try:
             print(f"Coletando {name}...")
-
             data = yf.download(
-                ticker,
-                period="6mo",
-                interval="1d",
-                auto_adjust=True,
-                progress=False,
-                threads=False
+                ticker, period="6mo", interval="1d",
+                auto_adjust=True, progress=False, threads=False
             )
 
             if data.empty:
-                print(f"Sem dados para {name}")
                 continue
 
-            # 🔥 Remove MultiIndex se existir
             if isinstance(data.columns, pd.MultiIndex):
                 data.columns = data.columns.get_level_values(0)
 
             data = data.reset_index()
 
             for _, row in data.iterrows():
-
                 close_value = row.get("Close")
                 volume_value = row.get("Volume", 0)
 
@@ -62,14 +52,10 @@ def collect_global_data():
                     (symbol, date, close, volume)
                     VALUES (?, ?, ?, ?)
                 """, (
-                    name,
-                    str(row["Date"]),
-                    float(close_value),
+                    name, str(row["Date"]), float(close_value),
                     float(volume_value) if not pd.isna(volume_value) else 0
                 ))
-
             print(f"Dados coletados para {name}")
-
         except Exception as e:
             print(f"Erro ao coletar {name}: {e}")
             continue
