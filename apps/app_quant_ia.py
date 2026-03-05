@@ -657,57 +657,117 @@ def tela_gerir_carteira():
     carteira_df_bruto = carregar_carteira(usuario_atual)
     
     with st.spinner("Atualizando dados da B3..."):
-        carteira_df, _ = processar_carteira_tempo_real(carteira_df_bruto)
+        carteira_df, patrimonio_total = processar_carteira_tempo_real(carteira_df_bruto)
 
-    # 1. VISÃO GERAL DA CARTEIRA
-    st.markdown("<div class='titulo-secao'>Tabela de Posições (Atualizado via B3)</div>", unsafe_allow_html=True)
+    # ==========================================
+    # 1. VISÃO GERAL E MÉTRICAS DINÂMICAS
+    # ==========================================
     if not carteira_df.empty:
-        # média dos dividendos por cota na carteira
+        # Cálculos de Rentabilidade
+        carteira_df['Custo Total'] = carteira_df['quantidade'] * carteira_df['preco_medio']
+        carteira_df['Lucro/Prejuízo (R$)'] = carteira_df['Valor Total'] - carteira_df['Custo Total']
+        carteira_df['Rentabilidade (%)'] = ((carteira_df['Preço Atual API'] - carteira_df['preco_medio']) / carteira_df['preco_medio']) * 100
+        
+        lucro_total = carteira_df['Lucro/Prejuízo (R$)'].sum()
+        custo_total = carteira_df['Custo Total'].sum()
+        rentabilidade_geral = (lucro_total / custo_total) * 100 if custo_total > 0 else 0
+
+        # Exibição dos Cards no Topo
+        col1, col2, col3 = st.columns(3)
+        col1.metric("Patrimônio Total", f"R$ {patrimonio_total:,.2f}")
+        col2.metric("Lucro / Prejuízo Total", f"R$ {lucro_total:,.2f}", f"{rentabilidade_geral:.2f}%")
+        
         avg_div = carteira_df['Dividendo Anual (API)'].replace(0, pd.NA).mean()
-        if not pd.isna(avg_div):
-            st.metric("Média de Dividendo Anual por Cota", f"R$ {avg_div:.2f}")
-        # incluímos também o dividendo anual por cota para saber quanto cada ação paga em média
-        visao_df = carteira_df[['ticker', 'quantidade', 'preco_medio', 'Preço Atual API', 'Dividendo Anual (API)', 'Valor Total']].copy()
-        visao_df.columns = ['Ativo', 'Volume', 'Preço Médio Pago', 'Preço Hoje (B3)', 'Div. Anual por Cota (R$)', 'Valor Total (R$)']
+        col3.metric("Média Div. Anual/Cota", f"R$ {avg_div:.2f}" if not pd.isna(avg_div) else "R$ 0.00")
+        
+        st.markdown("<div class='titulo-secao'>Minhas Posições (Atualizado via B3)</div>", unsafe_allow_html=True)
+        
+        # Tabela Formatada
+        visao_df = carteira_df[['ticker', 'quantidade', 'preco_medio', 'Preço Atual API', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total']].copy()
+        visao_df.columns = ['Ativo', 'Volume', 'Preço Médio', 'Preço Hoje', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total (R$)']
+        
+        # Função para pintar os números de verde ou vermelho
+        def color_negative_red(val):
+            color = '#ff6b6b' if val < 0 else '#00ffa3'
+            return f'color: {color}'
+
         st.dataframe(visao_df.style.format({
             'Volume': '{:.2f}', 
-            'Preço Médio Pago': 'R$ {:.2f}',
-            'Preço Hoje (B3)': 'R$ {:.2f}',
-            'Div. Anual por Cota (R$)': 'R$ {:.2f}',
+            'Preço Médio': 'R$ {:.2f}',
+            'Preço Hoje': 'R$ {:.2f}',
+            'Rentabilidade (%)': '{:.2f}%',
+            'Lucro/Prejuízo (R$)': 'R$ {:.2f}',
             'Valor Total (R$)': 'R$ {:.2f}'
-        }), width='stretch', hide_index=True)
+        }).map(color_negative_red, subset=['Rentabilidade (%)', 'Lucro/Prejuízo (R$)']), width='stretch', hide_index=True)
     else:
-        st.info("Você ainda não possui ativos registrados.")
+        st.info("Você ainda não possui ativos registrados na sua carteira.")
 
     st.markdown("<br>", unsafe_allow_html=True)
     
+    # ==========================================
     # 2. LANÇAMENTO DE COMPRAS E VENDAS
+    # ==========================================
     col_add, col_remove = st.columns(2)
+    
+    # Lista de ativos para o menu Dropdown
+    lista_ativos_populares = [
+        "PETR4.SA - Petrobras", "VALE3.SA - Vale", "ITUB4.SA - Itaú Unibanco", 
+        "BBAS3.SA - Banco do Brasil", "BBDC4.SA - Bradesco", "WEGE3.SA - Weg", 
+        "MGLU3.SA - Magazine Luiza", "JBSS3.SA - JBS", "ABEV3.SA - Ambev",
+        "BTC-USD - Bitcoin", "ETH-USD - Ethereum", "^GSPC - S&P 500",
+        "Outro (Digitar Manualmente)"
+    ]
     
     with col_add:
         st.markdown("<div class='titulo-secao'>Lançamento de Operação (Compra/Adição)</div>", unsafe_allow_html=True)
         
-        novo_ticker = st.text_input(
-            "Símbolo do Ativo (Pressione ENTER para buscar)",
-            key="novo_ticker_input",
-            on_change=atualizar_ticker
+        # Puxa o ticker que veio da tela "Explorar Ativos" (se houver)
+        ticker_padrao = st.session_state.get('novo_ticker_input', '')
+        index_padrao = 0
+        
+        if ticker_padrao:
+            for i, item in enumerate(lista_ativos_populares):
+                if item.startswith(ticker_padrao):
+                    index_padrao = i
+                    break
+            # Se veio um ticker que não está na lista padrão, adiciona ele no topo
+            if index_padrao == 0 and not lista_ativos_populares[0].startswith(ticker_padrao):
+                lista_ativos_populares.insert(0, f"{ticker_padrao} - Selecionado do Explorar")
+        
+        # O novo Dropdown de Pesquisa
+        selecao_dropdown = st.selectbox(
+            "Busque o ativo (digite o nome ou ticker para filtrar):", 
+            lista_ativos_populares,
+            index=index_padrao
         )
+        
+        # Se escolher "Outro", abre a caixa de texto antiga para digitar livremente
+        if selecao_dropdown == "Outro (Digitar Manualmente)":
+            novo_ticker_cru = st.text_input("Digite o Ticker (ex: SANB11.SA):").upper()
+        else:
+            novo_ticker_cru = selecao_dropdown.split(" - ")[0]
+        
         sugestao_preco = 0.0
         
-        if novo_ticker:
-            with st.spinner("Consultando API B3..."):
-                sugestao_preco, _ = buscar_dados_ticker_completo(novo_ticker)
+        if novo_ticker_cru and novo_ticker_cru != "OUTRO (DIGITAR MANUALMENTE)":
+            with st.spinner(f"Consultando cotação de {novo_ticker_cru}..."):
+                sugestao_preco, _ = buscar_dados_ticker_completo(novo_ticker_cru)
             if sugestao_preco > 0:
                 st.success(f"Ativo validado. Cotação Atual: R$ {sugestao_preco:.2f}")
             else:
-                st.error("Ativo não identificado na base de dados.")
+                st.error("Ativo não identificado. Verifique o ticker.")
                 
-        novo_qtd = st.number_input("Volume da Operação", min_value=0.0, step=1.0)
-        novo_pm = st.number_input("Preço de Execução (R$)", min_value=0.0, value=float(sugestao_preco), step=0.01)
+        # Campos de Quantidade e Preço lado a lado para poupar espaço
+        col_qtd, col_preco = st.columns(2)
+        with col_qtd:
+            novo_qtd = st.number_input("Volume da Operação", min_value=0.0, step=1.0)
+        with col_preco:
+            novo_pm = st.number_input("Preço Pago (R$)", min_value=0.0, value=float(sugestao_preco), step=0.01)
         
-        if st.button("Registrar Operação", type="primary", width='stretch'):
-            if novo_ticker and novo_pm > 0 and novo_qtd > 0:
-                gerir_ativo_db(usuario_atual, novo_ticker, novo_qtd, novo_pm)
+        if st.button("Registrar Operação", type="primary", use_container_width=True):
+            if novo_ticker_cru and novo_pm > 0 and novo_qtd > 0:
+                gerir_ativo_db(usuario_atual, novo_ticker_cru, novo_qtd, novo_pm)
+                st.session_state['novo_ticker_input'] = "" # Limpa a memória
                 st.success("Operação contabilizada com sucesso.")
                 st.rerun()
             else:
@@ -716,69 +776,108 @@ def tela_gerir_carteira():
     with col_remove:
         st.markdown("<div class='titulo-secao'>Liquidação de Posição</div>", unsafe_allow_html=True)
         if not carteira_df.empty:
+            st.markdown("<p style='color: #8b949e; font-size: 14px;'>Selecione o ativo que deseja remover completamente da sua carteira.</p>", unsafe_allow_html=True)
             with st.form("form_remove_ativo"):
-                ativo_para_remover = st.selectbox("Selecione o ativo para liquidação total:", carteira_df['ticker'].tolist())
-                if st.form_submit_button("Liquidar Posição"):
+                ativo_para_remover = st.selectbox("Selecione o ativo:", carteira_df['ticker'].tolist())
+                if st.form_submit_button("Liquidar Posição", use_container_width=True):
                     remover_ativo_db(usuario_atual, ativo_para_remover)
                     st.success("Posição zerada com sucesso.")
                     st.rerun()
         else:
             st.info("Nenhuma posição aberta no momento.")
 
+# =======================================================
+# NOVA FUNÇÃO DE CACHE (Busca preços rápido sem travar)
+# =======================================================
+@st.cache_data(ttl=600)  # Atualiza a cada 10 minutos
+def obter_cotacoes_explorar():
+    tickers_principais = ["PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBAS3.SA", "WEGE3.SA", "BTC-USD", "ETH-USD", "USDBRL=X", "^GSPC"]
+    dados = {}
+    for tk in tickers_principais:
+        try:
+            hist = yf.Ticker(tk).history(period="2d")
+            if len(hist) >= 2:
+                preco = float(hist['Close'].iloc[-1])
+                ontem = float(hist['Close'].iloc[-2])
+                var = ((preco - ontem) / ontem) * 100
+                dados[tk] = {'preco': preco, 'var': var}
+            elif not hist.empty:
+                dados[tk] = {'preco': float(hist['Close'].iloc[-1]), 'var': 0.0}
+            else:
+                dados[tk] = {'preco': 0.0, 'var': 0.0}
+        except:
+            dados[tk] = {'preco': 0.0, 'var': 0.0}
+    return dados
+
+
+# =======================================================
+# NOVA TELA EXPLORAR ATIVOS (Substitui a antiga)
+# =======================================================
 def tela_explorar_ativos():
     renderizar_menu()
     st.markdown("<h1>EXPLORAR ATIVOS</h1>", unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown("Aqui você encontra uma lista de ativos populares disponíveis para investimento. Use os tickers para adicionar à carteira ou perguntar à IA.")
+    st.markdown("Explore os ativos em destaque. Clique no botão **➕ Adicionar** para ser levado à sua carteira com o ativo já selecionado.")
     
-    # Lista de ativos populares (expandida)
-    ativos = [
-        {"Nome": "Petrobras", "Ticker": "PETR4.SA", "Setor": "Petróleo", "Tipo": "Ação"},
-        {"Nome": "Vale", "Ticker": "VALE3.SA", "Setor": "Mineração", "Tipo": "Ação"},
-        {"Nome": "Itaú Unibanco", "Ticker": "ITUB4.SA", "Setor": "Bancos", "Tipo": "Ação"},
-        {"Nome": "Ambev", "Ticker": "ABEV3.SA", "Setor": "Bebidas", "Tipo": "Ação"},
-        {"Nome": "Banco do Brasil", "Ticker": "BBAS3.SA", "Setor": "Bancos", "Tipo": "Ação"},
-        {"Nome": "Bradesco", "Ticker": "BBDC4.SA", "Setor": "Bancos", "Tipo": "Ação"},
-        {"Nome": "Magazine Luiza", "Ticker": "MGLU3.SA", "Setor": "Varejo", "Tipo": "Ação"},
-        {"Nome": "Weg", "Ticker": "WEGE3.SA", "Setor": "Indústria", "Tipo": "Ação"},
-        {"Nome": "Itaúsa", "Ticker": "ITSA4.SA", "Setor": "Holding", "Tipo": "Ação"},
-        {"Nome": "JBS", "Ticker": "JBSS3.SA", "Setor": "Alimentos", "Tipo": "Ação"},
-        {"Nome": "Nubank (CDB)", "Ticker": "NUBR33.SA", "Setor": "Fintech", "Tipo": "BDR"},
-        {"Nome": "Bitcoin", "Ticker": "BTC-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Ethereum", "Ticker": "ETH-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Binance Coin", "Ticker": "BNB-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Solana", "Ticker": "SOL-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Cardano", "Ticker": "ADA-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Polkadot", "Ticker": "DOT-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Chainlink", "Ticker": "LINK-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Litecoin", "Ticker": "LTC-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "XRP", "Ticker": "XRP-USD", "Setor": "Cripto", "Tipo": "Criptomoeda"},
-        {"Nome": "Apple", "Ticker": "AAPL", "Setor": "Tecnologia", "Tipo": "Ação EUA"},
-        {"Nome": "Microsoft", "Ticker": "MSFT", "Setor": "Tecnologia", "Tipo": "Ação EUA"},
-        {"Nome": "Amazon", "Ticker": "AMZN", "Setor": "Tecnologia", "Tipo": "Ação EUA"},
-        {"Nome": "Google", "Ticker": "GOOGL", "Setor": "Tecnologia", "Tipo": "Ação EUA"},
-        {"Nome": "Dólar Americano", "Ticker": "USDBRL=X", "Setor": "Câmbio", "Tipo": "Moeda"},
-        {"Nome": "Euro", "Ticker": "EURBRL=X", "Setor": "Câmbio", "Tipo": "Moeda"},
-        {"Nome": "Libra Esterlina", "Ticker": "GBPBRL=X", "Setor": "Câmbio", "Tipo": "Moeda"},
-        {"Nome": "Iene Japonês", "Ticker": "JPYBRL=X", "Setor": "Câmbio", "Tipo": "Moeda"},
-        {"Nome": "Ouro", "Ticker": "GC=F", "Setor": "Commodities", "Tipo": "Futuro"},
-        {"Nome": "Petróleo", "Ticker": "CL=F", "Setor": "Commodities", "Tipo": "Futuro"},
-        {"Nome": "S&P 500", "Ticker": "^GSPC", "Setor": "Índices", "Tipo": "Índice EUA"},
-        {"Nome": "NASDAQ", "Ticker": "^IXIC", "Setor": "Índices", "Tipo": "Índice EUA"},
-        {"Nome": "Dow Jones", "Ticker": "^DJI", "Setor": "Índices", "Tipo": "Índice EUA"},
-        {"Nome": "FTSE 100", "Ticker": "^FTSE", "Setor": "Índices", "Tipo": "Índice UK"},
-        {"Nome": "Nikkei 225", "Ticker": "^N225", "Setor": "Índices", "Tipo": "Índice Japão"},
-        {"Nome": "Hang Seng", "Ticker": "^HSI", "Setor": "Índices", "Tipo": "Índice Hong Kong"},
-    ]
-    
-    df_ativos = pd.DataFrame(ativos)
-    st.dataframe(df_ativos, width='stretch', hide_index=True)
-    
-    st.markdown("**Dicas:**")
-    st.markdown("- Para ações brasileiras, adicione '.SA' ao ticker (ex: PETR4.SA).")
-    st.markdown("- Para criptos, use BTC-USD ou ETH-USD.")
-    st.markdown("- Clique em um ticker para copiá-lo e usar na carteira ou IA.")
+    # Busca os preços em tempo real com spinner
+    with st.spinner("Sincronizando cotações globais..."):
+        cotacoes = obter_cotacoes_explorar()
 
+    # Organizando os ativos por blocos/setores para ficar elegante
+    categorias = {
+        "🇧🇷 Ações Brasileiras (Top B3)": [
+            {"Nome": "Petrobras", "Ticker": "PETR4.SA"},
+            {"Nome": "Vale", "Ticker": "VALE3.SA"},
+            {"Nome": "Itaú Unibanco", "Ticker": "ITUB4.SA"},
+            {"Nome": "Banco do Brasil", "Ticker": "BBAS3.SA"},
+            {"Nome": "Weg Indústria", "Ticker": "WEGE3.SA"},
+        ],
+        "🌎 Criptomoedas e Global": [
+            {"Nome": "Bitcoin", "Ticker": "BTC-USD"},
+            {"Nome": "Ethereum", "Ticker": "ETH-USD"},
+            {"Nome": "S&P 500", "Ticker": "^GSPC"},
+            {"Nome": "Dólar Comercial", "Ticker": "USDBRL=X"},
+        ]
+    }
+
+    # Desenhando os Cards na tela
+    for cat_nome, ativos in categorias.items():
+        st.markdown(f"<div class='titulo-secao'>{cat_nome}</div>", unsafe_allow_html=True)
+        
+        # Cria as linhas (Máximo de 4 cards por linha)
+        for i in range(0, len(ativos), 4):
+            cols = st.columns(4)
+            linha_atual = ativos[i:i+4]
+            
+            for j, ativo in enumerate(linha_atual):
+                tk = ativo["Ticker"]
+                info = cotacoes.get(tk, {'preco': 0.0, 'var': 0.0})
+                
+                # Definição de cores baseada na variação
+                cor_var = "#00ffa3" if info['var'] >= 0 else "#ff6b6b"
+                sinal = "+" if info['var'] > 0 else ""
+
+                with cols[j]:
+                    with st.container(border=True):  # Cria a bordinha do Card
+                        st.markdown(f"<span style='color:#8b949e; font-size:12px;'>{ativo['Nome']}</span>", unsafe_allow_html=True)
+                        st.markdown(f"<h4 style='margin:0; padding:0; color:#ffffff;'>{tk}</h4>", unsafe_allow_html=True)
+                        
+                        if info['preco'] > 0:
+                            # Formatação: Se for Dólar/Ação mostra R$, se for Cripto/Índice mostra $
+                            simbolo = "$" if "USD" in tk or "^" in tk else "R$"
+                            st.markdown(f"<h3 style='margin:0; padding-top:5px; font-size:22px; color:#c9d1d9;'>{simbolo} {info['preco']:,.2f}</h3>", unsafe_allow_html=True)
+                            st.markdown(f"<span style='color:{cor_var}; font-size:14px; font-weight:bold;'>{sinal}{info['var']:.2f}%</span>", unsafe_allow_html=True)
+                        else:
+                            st.markdown("<p style='color:#8b949e; padding-top:10px;'>Sem cotação</p>", unsafe_allow_html=True)
+                        
+                        st.markdown("<br>", unsafe_allow_html=True)
+                        
+                        # O grande botão mágico!
+                        if st.button("➕ Adicionar", key=f"btn_add_{tk}", use_container_width=True):
+                            # Salva o ticker escolhido e troca de página instantaneamente
+                            st.session_state['novo_ticker_input'] = tk
+                            st.session_state['pagina_atual'] = 'carteira'
+                            st.rerun()
 # ==========================================
 # 6. CONTROLADOR DE ROTAS
 # ==========================================
