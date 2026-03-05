@@ -1,0 +1,98 @@
+# Ambientes Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Ambientes virtuais
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+.venv/
+
+# Variáveis de ambiente
+.env
+.env.local
+.env.*.local
+*.env
+
+# IDEs & Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.pydevproject
+.settings/
+*.sublime-project
+*.sublime-workspace
+
+# Bancos de dados
+*.db
+*.sqlite
+*.sqlite3
+database.db
+
+# Logs
+*.log
+logs/
+*.log.*
+
+# Diretórios temporários
+tmp/
+temp/
+.tmp/
+
+# Arquivos do sistema
+.DS_Store
+Thumbs.db
+*.zip
+
+# Cache do Streamlit (se aplicável)
+.streamlit/
+.streamlit/config.toml
+
+# Pytest
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Dados específicos do projeto
+data/raw/
+data/cached/
+*.csv
+!requirements.csv
+
+# Credenciais e chaves
+secrets/
+keys/
+credentials.json
+config.local.py
