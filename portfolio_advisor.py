@@ -1,13 +1,20 @@
-import sqlite3
+import sys
+import os
+# Adiciona diretório raiz ao path
+root = os.path.abspath(os.path.dirname(__file__))
+if root not in sys.path:
+    sys.path.insert(0, root)
+
 import pandas as pd
 import yfinance as yf
 import math
+from core.database.database import get_user_connection
 
 def gerar_conselho_estrategico():
     print("🧠 IA processando sua carteira e cruzando com o mercado de hoje...\n")
     
     try:
-        conn = sqlite3.connect('market_data.db')
+        conn = get_user_connection()
         carteira_df = pd.read_sql("SELECT * FROM portfolio", conn)
         conn.close()
     except Exception as e:

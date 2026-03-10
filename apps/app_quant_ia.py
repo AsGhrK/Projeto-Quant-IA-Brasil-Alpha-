@@ -12,6 +12,7 @@ import pandas as pd
 import sqlite3
 import plotly.graph_objects as go
 import re
+from deep_translator import GoogleTranslator
 
 # Importando a conexão do seu arquivo database.py
 from core.database.database import get_market_connection, get_user_connection, init_databases
@@ -89,25 +90,6 @@ if 'novo_ticker_input' not in st.session_state:
 # ==========================================
 import bcrypt
 
-def cadastrar_usuario_db(nome, username, password):
-    """Armazena usuário com senha hashed em bcrypt.
-
-    A senha recebida é codificada e um salt aleatório adicionado antes de
-    persistir no banco. Caso o nome de usuário já exista, retorna False.
-    """
-    try:
-        conn = get_user_connection()
-        cursor = conn.cursor()
-        # geramos hash seguro; armazenamos como string utf-8
-        hashed = bcrypt.hashpw(password.encode('utf-8'), bcrypt.gensalt()).decode('utf-8')
-        cursor.execute('INSERT INTO usuarios (nome, username, password) VALUES (?, ?, ?)',
-                       (nome, username, hashed))
-        conn.commit()
-        conn.close()
-        return True
-    except sqlite3.IntegrityError:
-        return False
-
 def verificar_login_db(usuario, senha):
     conn = get_user_connection()
     cursor = conn.cursor()
@@ -120,16 +102,16 @@ def verificar_login_db(usuario, senha):
         import bcrypt
         # Verifica se a senha bate com o hash (ou texto puro se for legado)
         try:
-            if bcrypt.checkpw(senha.encode('utf-8'), senha_hash_db):
+            senha_hash_bytes = senha_hash_db.encode('utf-8') if isinstance(senha_hash_db, str) else senha_hash_db
+            if bcrypt.checkpw(senha.encode('utf-8'), senha_hash_bytes):
                 return nome
-        except ValueError:
+        except (ValueError, TypeError):
             # Fallback caso tenha salvo a senha em texto puro antes de usar bcrypt
             if senha == senha_hash_db:
                 return nome
     return None
 
 def cadastrar_usuario_db(nome, usuario, senha):
-    import bcrypt
     conn = get_user_connection()
     cursor = conn.cursor()
     
@@ -138,8 +120,8 @@ def cadastrar_usuario_db(nome, usuario, senha):
     senha_hash = bcrypt.hashpw(senha.encode('utf-8'), salt)
     
     try:
-        cursor.execute("INSERT INTO usuarios (nome, username, password) VALUES (?, ?, ?)", 
-                       (nome, usuario, senha_hash))
+        cursor.execute("INSERT INTO usuarios (nome, username, password) VALUES (?, ?, ?)",
+                   (nome, usuario, senha_hash.decode('utf-8')))
         conn.commit()
         sucesso = True
     except sqlite3.IntegrityError:
@@ -222,29 +204,202 @@ def remover_ativo_db(username, ticker):
     conn.close()
 
 def atualizar_ticker():
-    """Callback para converter input para maiúsculas em tempo real."""
     """Callback para converter input para maiúsculas em tempo real"""
     st.session_state['novo_ticker_input'] = st.session_state['novo_ticker_input'].upper()
+
+@st.cache_data(ttl=3600)
+def traduzir_texto(texto, idioma_destino='pt'):
+    """
+    Traduz texto para o idioma especificado usando Google Translate.
+    Cache de 1 hora para evitar traduções repetidas.
+    """
+    if not texto or len(texto.strip()) == 0:
+        return texto
+    try:
+        tradutor = GoogleTranslator(source='auto', target=idioma_destino)
+        # Limita o texto a 5000 caracteres (limite da API)
+        texto_limitado = texto[:4999] if len(texto) > 5000 else texto
+        return tradutor.translate(texto_limitado)
+    except Exception:
+        # Se falhar, retorna o texto original
+        return texto
+
+# Lista dos principais ativos do mercado brasileiro (Top 50 B3 + FIIs + Índices)
+ATIVOS_MERCADO_BRASILEIRO = [
+    # Blue Chips B3
+    "PETR4.SA", "VALE3.SA", "ITUB4.SA", "BBDC4.SA", "BBAS3.SA",
+    "ABEV3.SA", "WEGE3.SA", "RENT3.SA", "B3SA3.SA", "SUZB3.SA",
+    "JBSS3.SA", "RAIL3.SA", "GGBR4.SA", "CSNA3.SA", "USIM5.SA",
+    "EMBR3.SA", "HAPV3.SA", "CSAN3.SA", "BRAP4.SA", "EQTL3.SA",
+    "RADL3.SA", "PRIO3.SA", "KLBN11.SA", "VIVT3.SA", "CMIG4.SA",
+    "ELET3.SA", "CPLE6.SA", "PETR3.SA", "VALE5.SA", "ITSA4.SA",
+    # Fundos Imobiliários
+    "MXRF11.SA", "HGLG11.SA", "KNRI11.SA", "XPML11.SA", "VISC11.SA",
+    "BTLG11.SA", "HGRU11.SA", "BCFF11.SA", "KNCR11.SA", "RBRR11.SA",
+    # Small/Mid Caps
+    "MGLU3.SA", "AZUL4.SA", "GOAU4.SA", "COGN3.SA", "TOTS3.SA",
+    "QUAL3.SA", "BRFS3.SA", "MRFG3.SA", "BEEF3.SA", "LWSA3.SA"
+]
+
+@st.cache_data(ttl=900)
+def analisar_ativo_completo(ticker):
+    """
+    Análise completa de um ativo com ML, indicadores técnicos e regime de mercado.
+    Retorna dicionário com recomendação, score, análise e alertas.
+    """
+    try:
+        # Buscar dados históricos
+        df = get_stock_data(ticker)
+        if df.empty:
+            return {
+                'status': 'erro',
+                'ticker': ticker,
+                'mensagem': f'Não encontrei dados para {ticker}. Verifique se o ticker está correto (ex: PETR4.SA para ações brasileiras, BTC-USD para Bitcoin).',
+                'recomendacao': 'INDISPONÍVEL',
+                'score': 0
+            }
+        
+        # Adicionar indicadores técnicos
+        df = add_indicators(df)
+        if df.empty or len(df) < 50:
+            return {
+                'status': 'erro',
+                'ticker': ticker,
+                'mensagem': f'{ticker} não tem histórico suficiente (requer 50+ dias de negociação). Tente outro ativo.',
+                'recomendacao': 'DADOS INSUFICIENTES',
+                'score': 0
+            }
+        
+        # Treinar modelo ML
+        features = ['rsi', 'ema50', 'ema200', 'macd', 'volume_ratio', 'volatility']
+        model, accuracy = train_model(df)
+        last_data = df[features].iloc[-1:]
+        ml_prob = model.predict_proba(last_data)[0][1]  # Probabilidade de alta
+        
+        # Pegar última linha de indicadores
+        last = df.iloc[-1]
+        rsi = last['rsi']
+        ema50 = last['ema50']
+        ema200 = last['ema200']
+        macd = last['macd']
+        volume_ratio = last['volume_ratio']
+        
+        # Detectar regime de mercado
+        try:
+            regime = detect_regime()
+        except Exception:
+            regime = "Neutro"
+        
+        # Sistema de pontuação (0-100)
+        score = 0
+        alertas = []
+        
+        # Análise RSI (0-20 pontos)
+        if rsi < 30:
+            score += 20
+            alertas.append("RSI em sobrevenda - Oportunidade de compra")
+        elif rsi > 70:
+            score -= 15
+            alertas.append("RSI em sobrecompra - Cautela, ativo pode corrigir")
+        elif 40 <= rsi <= 60:
+            score += 10
+            alertas.append("RSI neutro - Ativo em equilíbrio")
+        
+        # Análise EMA - Tendência (0-25 pontos)
+        if last['Close'] > ema50 > ema200:
+            score += 25
+            alertas.append("Tendência de ALTA - Preço acima de EMA50 e EMA200")
+        elif last['Close'] > ema50:
+            score += 15
+            alertas.append("Tendência de ALTA de curto prazo")
+        elif last['Close'] < ema50 < ema200:
+            score -= 20
+            alertas.append("Tendência de BAIXA - Preço abaixo de EMA50 e EMA200")
+        
+        # Golden Cross / Death Cross
+        if ema50 > ema200 and df.iloc[-2]['ema50'] <= df.iloc[-2]['ema200']:
+            score += 20
+            alertas.append("GOLDEN CROSS detectado - Sinal forte de compra")
+        elif ema50 < ema200 and df.iloc[-2]['ema50'] >= df.iloc[-2]['ema200']:
+            score -= 25
+            alertas.append("DEATH CROSS detectado - Sinal forte de venda")
+        
+        # Análise MACD (0-15 pontos)
+        if macd > 0:
+            score += 15
+            alertas.append("MACD positivo - Momentum de compra")
+        else:
+            score -= 10
+            alertas.append("MACD negativo - Momentum de venda")
+        
+        # Análise de Volume (0-15 pontos)
+        if volume_ratio > 1.5:
+            score += 15
+            alertas.append("Volume acima da média - Movimentação forte")
+        elif volume_ratio < 0.5:
+            score -= 5
+            alertas.append("Volume baixo - Pouca liquidez")
+        
+        # ML Prediction (0-25 pontos)
+        if ml_prob > 0.65:
+            score += 25
+            alertas.append(f"IA prevê alta com {ml_prob*100:.1f}% de probabilidade")
+        elif ml_prob < 0.35:
+            score -= 20
+            alertas.append(f"IA prevê baixa com {(1-ml_prob)*100:.1f}% de probabilidade")
+        
+        # Ajuste por regime de mercado
+        if "Alta" in regime:
+            score += 10
+            alertas.append("Mercado global em alta - Ambiente favorável")
+        elif "Baixa" in regime:
+            score -= 10
+            alertas.append("Mercado global em baixa - Cautela recomendada")
+        
+        # Determinar recomendação final
+        if score >= 70:
+            recomendacao = "COMPRA FORTE"
+            acao = "COMPRAR AGORA"
+        elif score >= 40:
+            recomendacao = "COMPRA"
+            acao = "Boa oportunidade de entrada"
+        elif score >= 10:
+            recomendacao = "NEUTRO"
+            acao = "Aguardar sinais mais claros"
+        elif score >= -20:
+            recomendacao = "EVITAR"
+            acao = "Não recomendado para compra"
+        else:
+            recomendacao = "VENDA"
+            acao = "Considerar reduzir posição"
+        
+        return {
+            'status': 'sucesso',
+            'ticker': ticker,
+            'recomendacao': recomendacao,
+            'acao': acao,
+            'score': score,
+            'ml_prob': ml_prob,
+            'accuracy': accuracy,
+            'rsi': rsi,
+            'preco': last['Close'],
+            'ema50': ema50,
+            'ema200': ema200,
+            'regime': regime,
+            'alertas': alertas
+        }
+    
+    except Exception as e:
+        return {
+            'status': 'erro',
+            'mensagem': f'Erro ao analisar {ticker}: {str(e)}',
+            'recomendacao': 'AGUARDAR',
+            'score': 0
+        }
 
 # ==========================================
 # 4. MOTORES DE DADOS (APIs) E CÁLCULOS
 # ==========================================
-@st.cache_data(ttl=1800)
-def buscar_dados_macro():
-    tickers = {"IBOV": "^BVSP", "USD/BRL": "USDBRL=X", "BTC": "BTC-USD", "IFIX": "^IFIX", "EUR/BRL": "EURBRL=X", "ETH": "ETH-USD"}
-    dados = {}
-    for nome, tk in tickers.items():
-        try:
-            hist = yf.Ticker(tk).history(period="2d")
-            if not hist.empty and len(hist) >= 2:
-                hoje, ontem = hist['Close'].iloc[-1], hist['Close'].iloc[-2]
-                dados[nome] = {"valor": hoje, "var": ((hoje - ontem) / ontem) * 100}
-            else:
-                dados[nome] = {"valor": 0, "var": 0}
-        except:
-            dados[nome] = {"valor": 0, "var": 0}
-    return dados
-
 def buscar_dados_ticker_completo(ticker):
     """Busca cotação atual e dividendo anual estimado via Yahoo Finance.
     
@@ -316,6 +471,7 @@ def processar_carteira_tempo_real(carteira_df):
     carteira_df['Dividendo Anual (API)'] = dividendos_anuais
     return carteira_df, patrimonio_total
 
+@st.cache_data(ttl=1800)
 def buscar_dados_macro():
     """Busca os dados macroeconômicos mais recentes do banco de dados"""
     conn = get_market_connection()
@@ -460,6 +616,229 @@ def tela_dashboard():
     c4.metric("USD/BRL", f"R$ {dados_macro['USD/BRL']['valor']:.2f}", f"{dados_macro['USD/BRL']['var']:.2f}%")
     c5.metric("EUR/BRL", f"R$ {dados_macro['EUR/BRL']['valor']:.2f}", f"{dados_macro['EUR/BRL']['var']:.2f}%")
 
+    # ==========================================
+    # ANÁLISE AUTOMÁTICA DO MERCADO BRASILEIRO
+    # ==========================================
+    st.markdown("---")
+    st.markdown("<div class='titulo-secao'>Oportunidades no Mercado Brasileiro</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #8b949e; font-size: 14px;'>IA analisa automaticamente os principais ativos da B3 para encontrar oportunidades de investimento.</p>", unsafe_allow_html=True)
+    
+    # Seletor de quantidade de ativos
+    col_sel1, col_sel2 = st.columns([3, 1])
+    with col_sel1:
+        qtd_analise = st.select_slider(
+            "Quantos ativos analisar?",
+            options=[10, 20, 30, 40, 50],
+            value=20,
+            help="Quanto mais ativos, mais tempo levará a análise. Recomendado: 20"
+        )
+    with col_sel2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        btn_analisar_mercado = st.button("Analisar Mercado", type="primary", use_container_width=True)
+    
+    # Usa session_state para manter análise entre reloads
+    if 'analises_mercado_cache' not in st.session_state or btn_analisar_mercado:
+        with st.spinner(f"IA analisando {qtd_analise} ativos do mercado brasileiro... Isso pode levar alguns minutos."):
+            analises_mercado = []
+            progress_bar = st.progress(0)
+            for i, ticker in enumerate(ATIVOS_MERCADO_BRASILEIRO[:qtd_analise]):
+                analise = analisar_ativo_completo(ticker)
+                if analise.get('status') == 'sucesso':
+                    analises_mercado.append(analise)
+                progress_bar.progress((i + 1) / qtd_analise)
+            st.session_state['analises_mercado_cache'] = analises_mercado
+            progress_bar.empty()
+    else:
+        analises_mercado = st.session_state.get('analises_mercado_cache', [])
+    
+    if analises_mercado:
+        # Separa por tipo de recomendação
+        mercado_compra_forte = [a for a in analises_mercado if 'COMPRA FORTE' in a['recomendacao']]
+        mercado_compra = [a for a in analises_mercado if a['recomendacao'] == 'COMPRA']
+        mercado_neutro = [a for a in analises_mercado if 'NEUTRO' in a['recomendacao']]
+        mercado_evitar = [a for a in analises_mercado if 'EVITAR' in a['recomendacao']]
+        mercado_venda = [a for a in analises_mercado if 'VENDA' in a['recomendacao']]
+        
+        # Resumo geral
+        col_r1, col_r2, col_r3, col_r4, col_r5 = st.columns(5)
+        col_r1.metric("Compra Forte", len(mercado_compra_forte))
+        col_r2.metric("Compra", len(mercado_compra))
+        col_r3.metric("Neutro", len(mercado_neutro))
+        col_r4.metric("Evitar", len(mercado_evitar))
+        col_r5.metric("Venda", len(mercado_venda))
+        
+        # Tabs para organizar melhor
+        tab1, tab2, tab3 = st.tabs(["Melhores Oportunidades", "Tabela Completa", "Riscos"])
+        
+        with tab1:
+            if mercado_compra_forte or mercado_compra:
+                # Ordena por score (maior primeiro)
+                todas_compras = sorted(mercado_compra_forte + mercado_compra, key=lambda x: x['score'], reverse=True)
+                
+                st.markdown("### Top 10 Oportunidades do Mercado")
+                for i, a in enumerate(todas_compras[:10], 1):
+                    with st.expander(f"#{i} - {a['ticker']} | Score: {a['score']} | {a['recomendacao']}"):
+                        col1, col2, col3 = st.columns(3)
+                        with col1:
+                            st.metric("Preço", f"R$ {a['preco']:.2f}")
+                            st.metric("RSI", f"{a['rsi']:.1f}")
+                        with col2:
+                            st.metric("Prob. Alta", f"{a['ml_prob']*100:.1f}%")
+                            st.metric("Acurácia", f"{a['accuracy']*100:.1f}%")
+                        with col3:
+                            st.metric("EMA50", f"R$ {a['ema50']:.2f}")
+                            st.metric("EMA200", f"R$ {a['ema200']:.2f}")
+                        
+                        st.markdown(f"**Ação:** {a['acao']}")
+                        st.markdown(f"**Regime:** {a['regime']}")
+                        
+                        st.markdown("**Alertas:**")
+                        for alerta in a['alertas']:
+                            st.markdown(f"- {alerta}")
+                        
+                        # Botão para adicionar
+                        if st.button(f"Adicionar {a['ticker']} à Carteira", key=f"add_mercado_{a['ticker']}", use_container_width=True):
+                            st.session_state['novo_ticker_input'] = a['ticker']
+                            st.session_state['pagina_atual'] = 'carteira'
+                            st.rerun()
+            else:
+                st.info("Nenhuma oportunidade forte identificada no momento.")
+        
+        with tab2:
+            # Tabela completa com todos os ativos analisados
+            st.markdown("### Análise Completa do Mercado")
+            
+            # Cria DataFrame para exibição
+            tabela_mercado = []
+            for a in analises_mercado:
+                tabela_mercado.append({
+                    'Ticker': a['ticker'],
+                    'Recomendação': a['recomendacao'],
+                    'Score': a['score'],
+                    'Preço (R$)': a['preco'],
+                    'RSI': f"{a['rsi']:.1f}",
+                    'Prob. Alta (%)': f"{a['ml_prob']*100:.1f}",
+                    'Regime': a['regime']
+                })
+            
+            df_mercado = pd.DataFrame(tabela_mercado)
+            # Ordena por score
+            df_mercado = df_mercado.sort_values('Score', ascending=False)
+            
+            st.dataframe(df_mercado, use_container_width=True, hide_index=True)
+            
+            # Opção de download
+            csv_mercado = df_mercado.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="Baixar Análise em CSV",
+                data=csv_mercado,
+                file_name=f"analise_mercado_brasileiro_{pd.Timestamp.now().strftime('%Y%m%d_%H%M')}.csv",
+                mime="text/csv",
+                use_container_width=True
+            )
+        
+        with tab3:
+            if mercado_evitar or mercado_venda:
+                st.markdown("### Ativos com Risco identificado")
+                todos_riscos = sorted(mercado_evitar + mercado_venda, key=lambda x: x['score'])
+                
+                for a in todos_riscos:
+                    with st.expander(f"{a['ticker']} | Score: {a['score']} | {a['recomendacao']}"):
+                        col1, col2 = st.columns(2)
+                        with col1:
+                            st.metric("Preço", f"R$ {a['preco']:.2f}")
+                            st.metric("RSI", f"{a['rsi']:.1f}")
+                        with col2:
+                            st.metric("Prob. Alta", f"{a['ml_prob']*100:.1f}%")
+                            st.metric("Score", a['score'])
+                        
+                        st.warning(f"**{a['acao']}**")
+                        st.markdown("**Alertas:**")
+                        for alerta in a['alertas']:
+                            st.markdown(f"- {alerta}")
+            else:
+                st.success("Nenhum ativo com risco elevado identificado!")
+    else:
+        st.info("Clique em 'Analisar Mercado' para iniciar a análise automática da B3.")
+    
+    # ==========================================
+    # ALERTAS INTELIGENTES DA IA - ANÁLISE AUTOMÁTICA DA CARTEIRA
+    # ==========================================
+    if not carteira_df.empty:
+        st.markdown("---")
+        st.markdown("<div class='titulo-secao'>ALERTAS INTELIGENTES DA IA - Análise Automática da Sua Carteira</div>", unsafe_allow_html=True)
+        
+        with st.spinner("IA analisando todos os seus ativos com ML e indicadores técnicos..."):
+            analises = []
+            for ticker in carteira_df['ticker'].tolist():
+                analise = analisar_ativo_completo(ticker)
+                analises.append(analise)
+        
+        # Separa por tipo de recomendação
+        compras_fortes = [a for a in analises if a.get('status') == 'sucesso' and 'COMPRA FORTE' in a['recomendacao']]
+        compras = [a for a in analises if a.get('status') == 'sucesso' and a['recomendacao'] == 'COMPRA']
+        neutros = [a for a in analises if a.get('status') == 'sucesso' and 'NEUTRO' in a['recomendacao']]
+        evitar = [a for a in analises if a.get('status') == 'sucesso' and 'EVITAR' in a['recomendacao']]
+        venda = [a for a in analises if a.get('status') == 'sucesso' and 'VENDA' in a['recomendacao']]
+        
+        # Exibe alertas em colunas
+        col_alertas1, col_alertas2 = st.columns(2)
+        
+        with col_alertas1:
+            # Oportunidades de Compra
+            if compras_fortes or compras:
+                st.markdown("### OPORTUNIDADES DE COMPRA")
+                for analise in compras_fortes + compras:
+                    with st.expander(f"{analise['ticker']} - {analise['recomendacao']} (Score: {analise['score']})"):
+                        st.markdown(f"**Ação Recomendada:** {analise['acao']}")
+                        st.markdown(f"**Preço Atual:** R$ {analise['preco']:.2f}")
+                        st.markdown(f"**RSI:** {analise['rsi']:.1f}")
+                        st.markdown(f"**Probabilidade de Alta (IA):** {analise['ml_prob']*100:.1f}%")
+                        st.markdown(f"**Acurácia do Modelo:** {analise['accuracy']*100:.1f}%")
+                        st.markdown(f"**Regime de Mercado:** {analise['regime']}")
+                        st.markdown("**Alertas Detectados:**")
+                        for alerta in analise['alertas']:
+                            st.markdown(f"- {alerta}")
+            
+            # Ativos Neutros
+            if neutros:
+                st.markdown("### MONITORAR")
+                for analise in neutros:
+                    with st.expander(f"{analise['ticker']} - {analise['recomendacao']} (Score: {analise['score']})"):
+                        st.markdown(f"**Ação Recomendada:** {analise['acao']}")
+                        st.markdown(f"**Análise:** Ativo sem sinais claros. Continue acompanhando.")
+                        st.markdown("**Principais Indicadores:**")
+                        for alerta in analise['alertas'][:3]:
+                            st.markdown(f"- {alerta}")
+        
+        with col_alertas2:
+            # Alertas de Risco
+            if evitar or venda:
+                st.markdown("### ALERTAS DE RISCO")
+                for analise in evitar + venda:
+                    with st.expander(f"{analise['ticker']} - {analise['recomendacao']} (Score: {analise['score']})"):
+                        st.markdown(f"**Ação Recomendada:** {analise['acao']}")
+                        st.markdown(f"**Preço Atual:** R$ {analise['preco']:.2f}")
+                        st.markdown(f"**RSI:** {analise['rsi']:.1f}")
+                        st.markdown(f"**Probabilidade de Baixa (IA):** {(1-analise['ml_prob'])*100:.1f}%")
+                        st.markdown("**Alertas Críticos:**")
+                        for alerta in analise['alertas']:
+                            st.markdown(f"- {alerta}")
+                        if 'VENDA' in analise['recomendacao']:
+                            st.error("**Sugestão:** Considere realizar lucros ou reduzir exposição neste ativo.")
+            
+            # Resumo Geral
+            st.markdown("### RESUMO DA CARTEIRA")
+            total_ativos = len(analises)
+            st.metric("Total de Ativos Analisados", total_ativos)
+            
+            if compras_fortes:
+                st.success(f"{len(compras_fortes)} ativo(s) com COMPRA FORTE")
+            if compras:
+                st.info(f"{len(compras)} ativo(s) com COMPRA")
+            if evitar or venda:
+                st.warning(f"{len(evitar + venda)} ativo(s) com RISCO")
+
     col_esq, col_dir = st.columns([6, 4])
 
     # COLUNA ESQUERDA: Gráfico de Evolução dos Ativos (Linhas)
@@ -502,7 +881,7 @@ def tela_dashboard():
             st.info("Sua carteira está vazia. Cadastre ativos em 'Gerenciar Posições' para ver o gráfico de evolução.")
 
         # Análise Personalizada de Ativo
-        with st.expander("🔍 Análise Personalizada de Ativo"):
+        with st.expander("Análise Personalizada de Ativo"):
             custom_ticker = st.text_input("Digite o ticker (ex: PETR4.SA, BTC-USD)", key="custom_ticker")
             if st.button("Analisar", key="analisar_custom"):
                 if custom_ticker:
@@ -562,7 +941,7 @@ def tela_dashboard():
 
     # SEÇÃO IA ASSISTENTE
     st.markdown("---")
-    st.markdown("<div class='titulo-secao'>🤖 IA Assistente Financeiro</div>", unsafe_allow_html=True)
+    st.markdown("<div class='titulo-secao'>IA Assistente Financeiro</div>", unsafe_allow_html=True)
     
     pergunta = st.text_input("Faça uma pergunta sobre qualquer ativo (ex: 'O que acha de PETR4?' ou 'BTCUSDT')", key="pergunta_ia")
     
@@ -613,7 +992,7 @@ def tela_dashboard():
                             # Regime de mercado
                             try:
                                 regime = detect_regime()
-                            except:
+                            except Exception:
                                 regime = "Indeterminado"
                             
                             # Gerar resposta
@@ -626,21 +1005,26 @@ def tela_dashboard():
 
     # SEÇÃO NOTÍCIAS PRINCIPAIS
     st.markdown("---")
-    st.markdown("<div class='titulo-secao'>📰 Principais Notícias (Impacto no Mercado)</div>", unsafe_allow_html=True)
+    st.markdown("<div class='titulo-secao'>Principais Notícias (Impacto no Mercado)</div>", unsafe_allow_html=True)
     
     conn = get_market_connection()
     try:
         news_df = pd.read_sql("SELECT title, description, sentiment, published_at FROM news ORDER BY published_at DESC LIMIT 5", conn)
         if not news_df.empty:
-            for _, row in news_df.iterrows():
-                sentiment_color = "#00ffa3" if row['sentiment'] > 0.1 else "#ff6b6b" if row['sentiment'] < -0.1 else "#f39c12"
-                st.markdown(f"""
-                <div style='border-left: 3px solid {sentiment_color}; padding: 10px; margin-bottom: 10px; background-color: #161b22;'>
-                    <strong>{row['title']}</strong><br>
-                    <small style='color: #8b949e;'>{row['description'][:150]}...</small><br>
-                    <small style='color: {sentiment_color};'>Sentimento: {'Positivo' if row['sentiment'] > 0.1 else 'Negativo' if row['sentiment'] < -0.1 else 'Neutro'} | {row['published_at']}</small>
-                </div>
-                """, unsafe_allow_html=True)
+            with st.spinner("Traduzindo notícias..."):
+                for _, row in news_df.iterrows():
+                    # Traduz título e descrição para português
+                    titulo_traduzido = traduzir_texto(row['title'], 'pt')
+                    descricao_traduzida = traduzir_texto(row['description'], 'pt')
+                    
+                    sentiment_color = "#00ffa3" if row['sentiment'] > 0.1 else "#ff6b6b" if row['sentiment'] < -0.1 else "#f39c12"
+                    st.markdown(f"""
+                    <div style='border-left: 3px solid {sentiment_color}; padding: 10px; margin-bottom: 10px; background-color: #161b22;'>
+                        <strong>{titulo_traduzido}</strong><br>
+                        <small style='color: #8b949e;'>{descricao_traduzida[:150]}...</small><br>
+                        <small style='color: {sentiment_color};'>Sentimento: {'Positivo' if row['sentiment'] > 0.1 else 'Negativo' if row['sentiment'] < -0.1 else 'Neutro'} | {row['published_at']}</small>
+                    </div>
+                    """, unsafe_allow_html=True)
         else:
             st.info("Nenhuma notícia recente disponível. Execute a coleta de notícias.")
     except Exception as e:
@@ -680,11 +1064,27 @@ def tela_gerir_carteira():
         avg_div = carteira_df['Dividendo Anual (API)'].replace(0, pd.NA).mean()
         col3.metric("Média Div. Anual/Cota", f"R$ {avg_div:.2f}" if not pd.isna(avg_div) else "R$ 0.00")
         
-        st.markdown("<div class='titulo-secao'>Minhas Posições (Atualizado via B3)</div>", unsafe_allow_html=True)
+        # ==========================================
+        # ANÁLISE IA PARA CADA ATIVO DA CARTEIRA
+        # ==========================================
+        st.markdown("---")
+        st.markdown("<div class='titulo-secao'>Análise IA de Cada Ativo</div>", unsafe_allow_html=True)
         
-        # Tabela Formatada
-        visao_df = carteira_df[['ticker', 'quantidade', 'preco_medio', 'Preço Atual API', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total']].copy()
-        visao_df.columns = ['Ativo', 'Volume', 'Preço Médio', 'Preço Hoje', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total (R$)']
+        with st.spinner("IA analisando seus ativos..."):
+            analises_carteira = {}
+            for ticker in carteira_df['ticker'].tolist():
+                analise = analisar_ativo_completo(ticker)
+                analises_carteira[ticker] = analise
+        
+        # Adiciona coluna de recomendação IA
+        carteira_df['Status IA'] = carteira_df['ticker'].map(lambda t: analises_carteira[t].get('recomendacao', 'N/A'))
+        carteira_df['Score IA'] = carteira_df['ticker'].map(lambda t: analises_carteira[t].get('score', 0))
+        
+        st.markdown("<div class='titulo-secao'>Minhas Posições (Atualizado via B3 + IA)</div>", unsafe_allow_html=True)
+        
+        # Tabela Formatada com Status IA
+        visao_df = carteira_df[['ticker', 'quantidade', 'preco_medio', 'Preço Atual API', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total', 'Status IA', 'Score IA']].copy()
+        visao_df.columns = ['Ativo', 'Volume', 'Preço Médio', 'Preço Hoje', 'Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Valor Total (R$)', 'Recomendação IA', 'Score']
         
         # Função para pintar os números de verde ou vermelho
         def color_negative_red(val):
@@ -697,11 +1097,180 @@ def tela_gerir_carteira():
             'Preço Hoje': 'R$ {:.2f}',
             'Rentabilidade (%)': '{:.2f}%',
             'Lucro/Prejuízo (R$)': 'R$ {:.2f}',
-            'Valor Total (R$)': 'R$ {:.2f}'
-        }).map(color_negative_red, subset=['Rentabilidade (%)', 'Lucro/Prejuízo (R$)']), width='stretch', hide_index=True)
+            'Valor Total (R$)': 'R$ {:.2f}',
+            'Score': '{:.0f}'
+        }).map(color_negative_red, subset=['Rentabilidade (%)', 'Lucro/Prejuízo (R$)', 'Score']), width='stretch', hide_index=True)
+        
+        # Detalhes expandidos para cada ativo
+        st.markdown("### Detalhes e Recomendações por Ativo")
+        for ticker in carteira_df['ticker'].tolist():
+            analise = analises_carteira[ticker]
+            if analise.get('status') == 'sucesso':
+                with st.expander(f"{ticker} - {analise['recomendacao']} | Score: {analise['score']}"):
+                    col_det1, col_det2, col_det3 = st.columns(3)
+                    with col_det1:
+                        st.metric("Preço Atual", f"R$ {analise['preco']:.2f}")
+                        st.metric("RSI", f"{analise['rsi']:.1f}")
+                    with col_det2:
+                        st.metric("EMA50", f"R$ {analise['ema50']:.2f}")
+                        st.metric("EMA200", f"R$ {analise['ema200']:.2f}")
+                    with col_det3:
+                        st.metric("Prob. Alta (IA)", f"{analise['ml_prob']*100:.1f}%")
+                        st.metric("Acurácia", f"{analise['accuracy']*100:.1f}%")
+                    
+                    st.markdown(f"**Ação Recomendada:** {analise['acao']}")
+                    st.markdown(f"**Regime de Mercado:** {analise['regime']}")
+                    
+                    st.markdown("**Alertas e Indicadores:**")
+                    for alerta in analise['alertas']:
+                        st.markdown(f"- {alerta}")
+                    
+                    # Recomendação específica baseada na análise
+                    if "COMPRA FORTE" in analise['recomendacao']:
+                        st.success(f"**Sugestão:** Considere AUMENTAR sua posição em {ticker}. Os indicadores estão muito favoráveis!")
+                    elif "COMPRA" in analise['recomendacao']:
+                        st.info(f"**Sugestão:** Bom momento para fazer aportes em {ticker}.")
+                    elif "VENDA" in analise['recomendacao']:
+                        st.error(f"**Sugestão:** Considere REDUZIR ou ZERAR sua posição em {ticker} para proteger capital.")
+                    elif "EVITAR" in analise['recomendacao']:
+                        st.warning(f"**Sugestão:** NÃO faça novos aportes em {ticker} no momento. Aguarde reversão da tendência.")
+                    else:
+                        st.info(f"**Sugestão:** MANTENHA sua posição em {ticker} e continue monitorando.")
     else:
         st.info("Você ainda não possui ativos registrados na sua carteira.")
 
+    st.markdown("<br>", unsafe_allow_html=True)
+    
+    # ==========================================
+    #  BUSCAR RECOMENDAÇÃO IA PARA QUALQUER ATIVO
+    # ==========================================
+    st.markdown("---")
+    st.markdown("<div class='titulo-secao'>Buscar Recomendação IA para Qualquer Ativo</div>", unsafe_allow_html=True)
+    st.markdown("<p style='color: #8b949e; font-size: 14px;'>Analise qualquer ativo antes de investir! Digite o ticker e receba análise completa com ML e indicadores técnicos.</p>", unsafe_allow_html=True)
+    
+    col_busca, col_btn = st.columns([3, 1])
+    with col_busca:
+        ticker_busca = st.text_input(
+            "Digite o ticker do ativo (ex: PETR4.SA, BTC-USD, SANB11.SA)", 
+            key="busca_ia_ticker",
+            placeholder="Ex: PETR4.SA"
+        ).upper()
+    with col_btn:
+        st.markdown("<br>", unsafe_allow_html=True)
+        buscar_btn = st.button("Analisar com IA", type="primary", use_container_width=True)
+    
+    if buscar_btn and ticker_busca:
+        with st.spinner(f"IA analisando {ticker_busca} com ML e indicadores técnicos..."):
+            analise_busca = analisar_ativo_completo(ticker_busca)
+            
+            if analise_busca.get('status') == 'sucesso':
+                # Header com recomendação principal
+                rec_cor = "#00ffa3" if "COMPRA" in analise_busca['recomendacao'] else "#ff6b6b" if "VENDA" in analise_busca['recomendacao'] or "EVITAR" in analise_busca['recomendacao'] else "#f39c12"
+                
+                st.markdown(f"""
+                <div style='background: linear-gradient(135deg, {rec_cor}22 0%, {rec_cor}11 100%); 
+                            border-left: 4px solid {rec_cor}; 
+                            padding: 20px; 
+                            border-radius: 8px; 
+                            margin: 20px 0;'>
+                    <h2 style='margin: 0; color: {rec_cor};'>{ticker_busca}</h2>
+                    <h3 style='margin: 10px 0; color: #ffffff;'>{analise_busca['recomendacao']}</h3>
+                    <p style='margin: 0; font-size: 20px; color: #a3a8b8;'>Score: <strong style='color: {rec_cor};'>{analise_busca['score']}/100</strong></p>
+                </div>
+                """, unsafe_allow_html=True)
+                
+                # Métricas principais em 3 colunas
+                col_m1, col_m2, col_m3 = st.columns(3)
+                with col_m1:
+                    st.metric("Preço Atual", f"R$ {analise_busca['preco']:.2f}")
+                    st.metric("RSI", f"{analise_busca['rsi']:.1f}")
+                with col_m2:
+                    st.metric("EMA 50", f"R$ {analise_busca['ema50']:.2f}")
+                    st.metric("EMA 200", f"R$ {analise_busca['ema200']:.2f}")
+                with col_m3:
+                    st.metric("Probabilidade Alta (ML)", f"{analise_busca['ml_prob']*100:.1f}%")
+                    st.metric("Acurácia do Modelo", f"{analise_busca['accuracy']*100:.1f}%")
+                
+                # Informações detalhadas
+                col_info1, col_info2 = st.columns(2)
+                with col_info1:
+                    st.markdown("### Ação Recomendada")
+                    st.info(analise_busca['acao'])
+                    
+                    st.markdown("### Regime de Mercado")
+                    st.markdown(analise_busca['regime'])
+                
+                with col_info2:
+                    st.markdown("### Sinais e Indicadores")
+                    for alerta in analise_busca['alertas']:
+                        st.markdown(f"- {alerta}")
+                
+                # Recomendação final personalizada
+                st.markdown("---")
+                st.markdown("### Análise Final e Sugestão")
+                
+                if "COMPRA FORTE" in analise_busca['recomendacao']:
+                    st.success(f"""
+                    **RECOMENDAÇÃO: COMPRA FORTE**
+                    
+                    {ticker_busca} apresenta sinais técnicos e fundamentais muito positivos. 
+                    É um excelente momento para **iniciar posição** ou **aumentar exposição**.
+                    
+                    - Score: {analise_busca['score']}/100 (Muito Favorável)
+                    - Probabilidade ML de Alta: {analise_busca['ml_prob']*100:.1f}%
+                    - Tendência: {analise_busca['regime']}
+                    """)
+                elif "COMPRA" in analise_busca['recomendacao']:
+                    st.info(f"""
+                    **RECOMENDAÇÃO: COMPRA**
+                    
+                    {ticker_busca} mostra boas oportunidades de entrada. Indicadores apontam para valorização.
+                    
+                    - Score: {analise_busca['score']}/100 (Favorável)
+                    - Probabilidade ML de Alta: {analise_busca['ml_prob']*100:.1f}%
+                    - Tendência: {analise_busca['regime']}
+                    """)
+                elif "VENDA" in analise_busca['recomendacao']:
+                    st.error(f"""
+                    **RECOMENDAÇÃO: VENDA**
+                    
+                    {ticker_busca} apresenta sinais de risco elevado. Se você possui este ativo, considere **reduzir** ou **zerar** a posição.
+                    
+                    - Score: {analise_busca['score']}/100 (Desfavorável)
+                    - Probabilidade ML de Alta: {analise_busca['ml_prob']*100:.1f}%
+                    - Tendência: {analise_busca['regime']}
+                    """)
+                elif "EVITAR" in analise_busca['recomendacao']:
+                    st.warning(f"""
+                    **RECOMENDAÇÃO: EVITAR**
+                    
+                    {ticker_busca} não apresenta condições favoráveis para entrada. **NÃO** faça novos aportes até reversão dos sinais.
+                    
+                    - Score: {analise_busca['score']}/100 (Desfavorável)
+                    - Probabilidade ML de Alta: {analise_busca['ml_prob']*100:.1f}%
+                    - Tendência: {analise_busca['regime']}
+                    """)
+                else:
+                    st.info(f"""
+                    **RECOMENDAÇÃO: NEUTRO**
+                    
+                    {ticker_busca} está em momento de indefinição. **MANTENHA** suas posições atuais e aguarde sinais mais claros.
+                    
+                    - Score: {analise_busca['score']}/100 (Neutro)
+                    - Probabilidade ML de Alta: {analise_busca['ml_prob']*100:.1f}%
+                    - Tendência: {analise_busca['regime']}
+                    """)
+                
+                # Botão para adicionar à carteira
+                if "COMPRA" in analise_busca['recomendacao']:
+                    st.markdown("---")
+                    if st.button(f"Adicionar {ticker_busca} à Minha Carteira", type="primary", use_container_width=True):
+                        st.session_state['novo_ticker_input'] = ticker_busca
+                        st.rerun()
+                        
+            else:
+                st.error(analise_busca.get('mensagem', f"Não foi possível analisar {ticker_busca}. Verifique se o ticker está correto (ex: PETR4.SA para ações brasileiras, BTC-USD para Bitcoin)."))
+    
     st.markdown("<br>", unsafe_allow_html=True)
     
     # ==========================================
@@ -805,7 +1374,7 @@ def obter_cotacoes_explorar():
                 dados[tk] = {'preco': float(hist['Close'].iloc[-1]), 'var': 0.0}
             else:
                 dados[tk] = {'preco': 0.0, 'var': 0.0}
-        except:
+        except Exception:
             dados[tk] = {'preco': 0.0, 'var': 0.0}
     return dados
 
@@ -817,7 +1386,7 @@ def tela_explorar_ativos():
     renderizar_menu()
     st.markdown("<h1>EXPLORAR ATIVOS</h1>", unsafe_allow_html=True)
     st.markdown("---")
-    st.markdown("Explore os ativos em destaque. Clique no botão **➕ Adicionar** para ser levado à sua carteira com o ativo já selecionado.")
+    st.markdown("Explore os ativos em destaque. Clique no botão **Adicionar** para ser levado à sua carteira com o ativo já selecionado.")
     
     # Busca os preços em tempo real com spinner
     with st.spinner("Sincronizando cotações globais..."):
@@ -825,14 +1394,14 @@ def tela_explorar_ativos():
 
     # Organizando os ativos por blocos/setores para ficar elegante
     categorias = {
-        "🇧🇷 Ações Brasileiras (Top B3)": [
+        "Ações Brasileiras (Top B3)": [
             {"Nome": "Petrobras", "Ticker": "PETR4.SA"},
             {"Nome": "Vale", "Ticker": "VALE3.SA"},
             {"Nome": "Itaú Unibanco", "Ticker": "ITUB4.SA"},
             {"Nome": "Banco do Brasil", "Ticker": "BBAS3.SA"},
             {"Nome": "Weg Indústria", "Ticker": "WEGE3.SA"},
         ],
-        "🌎 Criptomoedas e Global": [
+        "Criptomoedas e Global": [
             {"Nome": "Bitcoin", "Ticker": "BTC-USD"},
             {"Nome": "Ethereum", "Ticker": "ETH-USD"},
             {"Nome": "S&P 500", "Ticker": "^GSPC"},
@@ -873,7 +1442,7 @@ def tela_explorar_ativos():
                         st.markdown("<br>", unsafe_allow_html=True)
                         
                         # O grande botão mágico!
-                        if st.button("➕ Adicionar", key=f"btn_add_{tk}", use_container_width=True):
+                        if st.button("Adicionar", key=f"btn_add_{tk}", use_container_width=True):
                             # Salva o ticker escolhido e troca de página instantaneamente
                             st.session_state['novo_ticker_input'] = tk
                             st.session_state['pagina_atual'] = 'carteira'
@@ -890,3 +1459,7 @@ else:
         tela_gerir_carteira()
     elif st.session_state['pagina_atual'] == 'explorar':
         tela_explorar_ativos()
+
+
+
+

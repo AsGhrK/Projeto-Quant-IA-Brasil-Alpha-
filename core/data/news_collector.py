@@ -1,8 +1,12 @@
+import os
 import requests
 from textblob import TextBlob
+from dotenv import load_dotenv
 from core.database.database import get_market_connection
 
-NEWS_API_KEY = "6be567e795204d649f123fb0dcd4d3b8"
+# Carrega variáveis de ambiente do arquivo .env
+load_dotenv()
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 def analyze_sentiment(text):
     if not text: return 0.0

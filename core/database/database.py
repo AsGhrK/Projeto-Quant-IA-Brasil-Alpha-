@@ -90,6 +90,7 @@ def init_databases():
         ticker TEXT NOT NULL,
         quantidade REAL NOT NULL,
         preco_medio REAL NOT NULL,
+        dividendo_por_cota REAL DEFAULT 0,
         FOREIGN KEY(user_id) REFERENCES usuarios(id)
     )
     """)

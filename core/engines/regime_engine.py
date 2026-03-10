@@ -6,11 +6,11 @@ from core.database.database import get_market_connection
 def get_latest_data(symbol):
     conn = get_market_connection()
 
-    df = pd.read_sql(f"""
+    df = pd.read_sql("""
         SELECT * FROM global_markets
-        WHERE symbol = '{symbol}'
+        WHERE symbol = ?
         ORDER BY date ASC
-    """, conn)
+    """, conn, params=(symbol,))
 
     conn.close()
     return df

@@ -2,6 +2,35 @@
 
 > Uma plataforma de análise quantitativa integrada com inteligência artificial para otimizar decisões de investimento no Brasil.
 
+## ⚡ Início Rápido
+
+### 🚀 Como Executar (Método Simples)
+
+```bash
+# 1. Ative o ambiente virtual (se ainda não estiver ativo)
+.\venv\Scripts\Activate.ps1  # Windows
+# source venv/bin/activate   # Linux/Mac
+
+# 2. Execute o script de inicialização
+python start.py
+```
+
+O script `start.py` irá:
+- ✅ Verificar e criar os bancos de dados
+- ✅ Oferecer criação de carteira de teste
+- ✅ Coletar dados iniciais do mercado
+- ✅ Iniciar o aplicativo Streamlit automaticamente
+
+### 🔐 Credenciais de Teste
+
+Após iniciar, faça login com:
+- **Username:** `demo`
+- **Senha:** `demo123`
+
+### 📚 Documentação Completa
+
+Para instruções detalhadas, consulte [QUICKSTART.md](QUICKSTART.md)
+
 ---
 
 ## 📊 O que é Quant IA Brasil?
@@ -65,39 +94,48 @@ quant-ia-brasil/
 
 ## 🚀 Como Usar
 
-### 1️⃣ Instalação Rápida
+### 1️⃣ Instalação
 
 ```bash
-# Clonar ou descompactar o projeto
-cd "Nova pasta"
+# 1. Clonar o repositório
+git clone <seu-repositorio>
+cd Projeto-Quant-IA-Brasil-Alpha-
 
-# Criar e ativar ambiente virtual
+# 2. Criar e ativar ambiente virtual
 python -m venv venv
 .\venv\Scripts\Activate.ps1  # Windows PowerShell
+# source venv/bin/activate    # Linux/Mac
 
-# Instalar dependências
+# 3. Instalar dependências
 pip install -r requirements.txt
+
+# 4. Configurar variáveis de ambiente
+# Copie .env.example para .env e adicione sua NewsAPI key
+cp .env.example .env
+# Edite o arquivo .env com sua API key
 ```
 
-### 2️⃣ Iniciar o Dashboard Streamlit
+### 2️⃣ Inicialização
 
+**Método Simples (Recomendado):**
 ```bash
+python start.py
+```
+
+**Método Manual:**
+```bash
+# Criar bancos e carteira de teste
+python scripts/setup_carteira.py
+
+# Coletar dados do mercado
+python scripts/collect_all.py
+
+# Iniciar o Dashboard
 streamlit run apps/app_quant_ia.py
 ```
 
 Acesse: **http://localhost:8501**
 
-### 3️⃣ (Opcional) Executar Coleta Manual
-
-```bash
-python scripts/collect_all.py
-```
-
-### 4️⃣ (Opcional) Configurar Carteira Inicial
-
-```bash
-python scripts/setup_carteira.py
-```
 
 ---
 
